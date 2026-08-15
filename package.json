@@ -1,8 +1,9 @@
 {
-  "name": "my-extension",
-  "version": "0.1.0",
+  "name": "nis-ad-blocker",
+  "version": "1.0.0",
   "private": true,
   "type": "module",
+  "description": "NIS Ad Blocker - Block ads, trackers, and unwanted content",
   "scripts": {
     "dev": "vite",
     "build": "tsc && node build.js",

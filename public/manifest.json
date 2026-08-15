@@ -1,15 +1,19 @@
 {
   "manifest_version": 3,
-  "name": "My Extension",
+  "name": "nisch",
   "version": "1.0.0",
-  "description": "A Chrome extension built with Next.js and TypeScript",
+  "description": "Powerful ad blocker that removes ads, trackers, and improves browsing speed",
   "permissions": [
     "storage",
     "activeTab",
     "scripting",
-    "notifications",
-    "alarms",
-    "contextMenus"
+    "declarativeNetRequest",
+    "declarativeNetRequestFeedback",
+    "webNavigation",
+    "tabs"
+  ],
+  "host_permissions": [
+    "<all_urls>"
   ],
   "action": {
     "default_popup": "popup.html",
@@ -33,5 +37,14 @@
     "48": "icon48.png",
     "128": "icon128.png"
   },
-  "options_page": "options.html"
+  "options_page": "options.html",
+  "declarative_net_request": {
+    "rule_resources": [
+      {
+        "id": "ruleset_1",
+        "enabled": true,
+        "path": "rules.json"
+      }
+    ]
+  }
 }
