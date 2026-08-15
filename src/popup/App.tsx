@@ -14,15 +14,18 @@ export default function App() {
   });
   const [activeTab, setActiveTab] = useState<string>('');
   const [tabUrl, setTabUrl] = useState<string>('');
+  const [currentHost, setCurrentHost] = useState<string>('');
+  const [allowlistedSites, setAllowlistedSites] = useState<string[]>([]);
 
   useEffect(() => {
     // Load stats from storage
-    chrome.storage.local.get(['totalBlocked', 'sessionBlocked', 'enabled'], (result) => {
+    chrome.storage.local.get(['totalBlocked', 'sessionBlocked', 'enabled', 'allowlistedSites'], (result) => {
       setStats({
         totalBlocked: (result.totalBlocked as number) || 0,
         sessionBlocked: (result.sessionBlocked as number) || 0,
         enabled: result.enabled !== false,
       });
+      setAllowlistedSites((result.allowlistedSites as string[]) || []);
     });
 
     // Get active tab info
@@ -30,6 +33,11 @@ export default function App() {
       if (tabs[0]) {
         setActiveTab(tabs[0].title || '');
         setTabUrl(tabs[0].url || '');
+        try {
+          setCurrentHost(getSiteKey(new URL(tabs[0].url || '').hostname));
+        } catch {
+          setCurrentHost('');
+        }
       }
     });
 
@@ -40,6 +48,9 @@ export default function App() {
       if (changes.sessionBlocked) newStats.sessionBlocked = changes.sessionBlocked.newValue as number;
       if (changes.enabled !== undefined) newStats.enabled = changes.enabled.newValue as boolean;
       setStats(newStats);
+      if (changes.allowlistedSites) {
+        setAllowlistedSites((changes.allowlistedSites.newValue as string[]) || []);
+      }
     };
 
     chrome.storage.onChanged.addListener(handleStorageChange);
@@ -48,6 +59,23 @@ export default function App() {
       chrome.storage.onChanged.removeListener(handleStorageChange);
     };
   }, []);
+
+  const getSiteKey = (hostname: string) => {
+    const parts = hostname.toLowerCase().replace(/\.$/, '').split('.');
+    return parts.length > 2 && parts[0] === 'www' ? parts.slice(1).join('.') : parts.join('.');
+  };
+
+  const isCurrentSitePaused = currentHost !== '' && allowlistedSites.includes(currentHost);
+
+  const toggleSitePause = () => {
+    if (!currentHost) return;
+    const exists = allowlistedSites.includes(currentHost);
+    const next = exists
+      ? allowlistedSites.filter((s) => s !== currentHost)
+      : [...allowlistedSites, currentHost];
+    setAllowlistedSites(next);
+    chrome.storage.local.set({ allowlistedSites: next });
+  };
 
   const toggleAdBlocker = () => {
     const newEnabled = !stats.enabled;
@@ -107,15 +135,34 @@ export default function App() {
         {/* Current Site */}
         {isProtocolSupported && (
           <div className="bg-white rounded-lg shadow-md p-4">
-            <h2 className="text-sm font-semibold text-gray-600 mb-2">
-              Current Site
-            </h2>
+            <div className="flex items-center justify-between mb-2">
+              <h2 className="text-sm font-semibold text-gray-600">
+                Current Site
+              </h2>
+              {currentHost && (
+                <button
+                  onClick={toggleSitePause}
+                  className={`px-3 py-1 rounded-full text-xs font-semibold transition-colors ${
+                    isCurrentSitePaused
+                      ? 'bg-green-100 text-green-700 hover:bg-green-200'
+                      : 'bg-gray-100 text-gray-600 hover:bg-gray-200'
+                  }`}
+                >
+                  {isCurrentSitePaused ? '▶ Resume' : '⏸ Pause'}
+                </button>
+              )}
+            </div>
             <p className="text-xs text-gray-700 truncate mb-1">
               {activeTab || 'No active tab'}
             </p>
             <p className="text-xs text-gray-500 truncate">
               {tabUrl}
             </p>
+            {isCurrentSitePaused && (
+              <p className="text-xs text-green-700 mt-2 bg-green-50 rounded p-2">
+                Blocking is paused on {currentHost} — content won't be hidden here
+              </p>
+            )}
           </div>
         )}
 

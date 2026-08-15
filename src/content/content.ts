@@ -1,105 +1,164 @@
 // NIS Ad Blocker - Content Script
 console.log('NIS Ad Blocker content script loaded on:', window.location.href);
 
-// Common ad selectors (CSS-based blocking)
-const AD_SELECTORS = [
-  // Generic ad classes and IDs
+// ---- Selectors ----
+// High-confidence selectors: specific patterns unlikely to match legit content
+const STRONG_AD_SELECTORS = [
   '[class*="advertisement"]',
   '[id*="advertisement"]',
   '[class*="ad-container"]',
   '[id*="ad-container"]',
+  '[class*="ad-slot"]',
+  '[class*="ad-banner"]',
   '[class*="adsbygoogle"]',
-  '.ad',
-  '.ads',
-  '.advert',
-  '.banner-ad',
-  '.sponsored',
-  '[data-ad-slot]',
-  '[data-google-query-id]',
-  
-  // Common ad networks
   'ins.adsbygoogle',
   '.google-ad',
   '.adsense',
-  
-  // Social media ads
+  '.banner-ad',
+  '[data-ad-slot]',
+  '[data-ad-client]',
+  '[data-google-query-id]',
   '[data-testid*="placementTracking"]',
-  '[data-ad]',
-  
-  // Video ads
   '.video-ads',
   '.preroll-ad',
-  
-  // Pop-ups and overlays
   '.popup-ad',
   '.overlay-ad',
   '.modal-ad',
-  
-  // Sidebar and footer ads
   '.sidebar-ad',
   '.footer-ad',
-  
-  // Native ads
   '[class*="native-ad"]',
-  '[class*="promoted"]',
-  
-  // Tracking pixels
+  '.native-ad',
   'img[width="1"][height="1"]',
-  'img[style*="display:none"]',
 ];
+
+// Low-confidence selectors: generic names that can appear on legit content
+const WEAK_AD_SELECTORS = [
+  '.ad',
+  '.ads',
+  '.advert',
+  '.sponsored',
+  '[data-ad]',
+  '[class*="promoted"]',
+];
+
+const AD_SELECTORS = [...STRONG_AD_SELECTORS, ...WEAK_AD_SELECTORS];
+
+// Site-specific selectors for well-known ad layouts that generic rules miss
+const SITE_RULES: Record<string, string[]> = {
+  'bbc.com': ['.dotcom-ad'],
+  'bbc.co.uk': ['.dotcom-ad'],
+  'reddit.com': ['[data-testid="search-ad"]', 'shreddit-ad'],
+  'spotify.com': ['[data-testid="advertisement"]'],
+  'open.spotify.com': ['[data-testid="advertisement"]'],
+  'youtube.com': ['ytd-ad-slot-renderer', 'ytd-display-ad-renderer', 'ytd-in-feed-ad-layout-renderer', 'ytd-banner-promo-renderer', '.ytp-ad-module', 'ytd-ad-slot-renderer', 'ytd-player-legacy-desktop-watch-ads-renderer', 'ytd-statement-banner-renderer[ad]', '.ad-container'],
+};
+
+// Sites where blocking is paused entirely (AI chat/search apps are prone
+// to false positives)
+const DEFAULT_ALLOWLISTED_SITES = [
+  'chatgpt.com',
+  'openai.com',
+  'claude.ai',
+  'gemini.google.com',
+];
+
+// Small labels that often sit next to ads and reserve space
+const AD_LABEL_RE = /^(advertisements?|adverts?|ads?|ads? by .{1,30}|sponsored|sponsored (link|links|content|post|products?)|promoted|promoted (link|links|content|post)|brought to you by .{1,30}|publicit(e|é)|annonce|anzeige|reklame)$/i;
+
+// Iframe detection (word-boundary so "badge"/"head" are not matched)
+const AD_IFRAME_SRC_RE = /(doubleclick|googlesyndication|googletagmanager|\/ads\/|advertising|ads\.|adnxs|criteo|taboola|outbrain)/i;
+const AD_IFRAME_ATTR_RE = /\b(ad|ads|advert|advertisement|advertorial)\b/i;
 
 // Statistics
 let removedAdsCount = 0;
 
-// Check if ad blocker is enabled
+// State
 let isEnabled = true;
+let sitePaused = false;
+let hideAdPlaceholders = true;
+let siteAllowlist: string[] = DEFAULT_ALLOWLISTED_SITES;
+let styleEl: HTMLStyleElement | null = null;
+let observer: MutationObserver | null = null;
+let activeSelectors: string[] = AD_SELECTORS;
 
-chrome.storage.local.get(['enabled'], (result) => {
+function getSiteKey(hostname: string): string {
+  const parts = hostname.toLowerCase().replace(/\.$/, '').split('.');
+  return parts.length > 2 && parts[0] === 'www' ? parts.slice(1).join('.') : parts.join('.');
+}
+
+function isSiteAllowlisted(hostname: string, list: string[]): boolean {
+  const h = hostname.toLowerCase();
+  return list.some((site) => site === h || h.endsWith('.' + site));
+}
+
+chrome.storage.local.get(['enabled', 'settings', 'allowlistedSites'], (result) => {
   isEnabled = result.enabled !== false;
-  if (isEnabled) {
-    initAdBlocker();
-  }
+  const settings = result.settings as { hideAdPlaceholders?: boolean } | undefined;
+  hideAdPlaceholders = settings?.hideAdPlaceholders !== false;
+  siteAllowlist = (result.allowlistedSites as string[]) || DEFAULT_ALLOWLISTED_SITES;
+  applySitePolicy();
 });
 
-// Listen for enable/disable messages
+// Listen for enable/disable and site allowlist changes
 chrome.storage.onChanged.addListener((changes) => {
   if (changes.enabled) {
     isEnabled = changes.enabled.newValue as boolean;
-    if (isEnabled) {
+    if (isEnabled && !sitePaused) {
       initAdBlocker();
-    } else {
-      console.log('NIS: Ad blocking disabled');
+    } else if (!isEnabled) {
+      restoreElements();
     }
+  }
+
+  if (changes.settings) {
+    const settings = changes.settings.newValue as { hideAdPlaceholders?: boolean };
+    hideAdPlaceholders = settings?.hideAdPlaceholders !== false;
+  }
+
+  if (changes.allowlistedSites) {
+    siteAllowlist = (changes.allowlistedSites.newValue as string[]) || [];
+    applySitePolicy();
   }
 });
 
+// Apply the current site allowlist policy
+function applySitePolicy() {
+  const paused = isSiteAllowlisted(location.hostname, siteAllowlist);
+  if (paused && !sitePaused) {
+    sitePaused = true;
+    restoreElements();
+    console.log('NIS: Blocking paused on this site');
+  } else if (!paused) {
+    sitePaused = false;
+    if (isEnabled) {
+      initAdBlocker();
+    }
+  }
+}
+
 function initAdBlocker() {
-  // Remove existing ads
-  removeAds();
+  if (!isEnabled || sitePaused) return;
 
-  // Watch for new ads being added
-  observeDOM();
+  const siteKey = getSiteKey(location.hostname);
+  activeSelectors = [...AD_SELECTORS, ...(SITE_RULES[siteKey] || [])];
 
-  // Hide ad elements with CSS
   injectStyles();
+  removeAds();
+  observeDOM();
 
   console.log(`NIS: Removed ${removedAdsCount} ad elements`);
 }
 
 // Remove ad elements from the page
 function removeAds() {
-  if (!isEnabled) return;
+  if (!isEnabled || sitePaused) return;
 
-  AD_SELECTORS.forEach((selector) => {
+  activeSelectors.forEach((selector) => {
     try {
       const elements = document.querySelectorAll(selector);
       elements.forEach((element) => {
         if (element && element.parentNode) {
-          // Hide instead of remove to avoid breaking page layout
-          (element as HTMLElement).style.display = 'none';
-          (element as HTMLElement).style.visibility = 'hidden';
-          (element as HTMLElement).setAttribute('data-nis-blocked', 'true');
-          removedAdsCount++;
+          blockElement(element as HTMLElement);
         }
       });
     } catch (error) {
@@ -112,6 +171,24 @@ function removeAds() {
   removeAdIframes();
 }
 
+// Mark an element as blocked and collapse the space it took
+function blockElement(element: HTMLElement) {
+  if (element.getAttribute('data-nis-blocked') === 'true') return;
+  // Capture height before hiding so we know how much space the ad occupied
+  const blockedHeight = element.getBoundingClientRect().height;
+  markBlocked(element);
+  if (hideAdPlaceholders) {
+    collapseEmptyContainers(element, blockedHeight);
+  }
+}
+
+function markBlocked(element: HTMLElement) {
+  element.style.display = 'none';
+  element.style.visibility = 'hidden';
+  element.setAttribute('data-nis-blocked', 'true');
+  removedAdsCount++;
+}
+
 // Remove ad iframes
 function removeAdIframes() {
   const iframes = document.querySelectorAll('iframe');
@@ -121,52 +198,147 @@ function removeAdIframes() {
     const className = iframe.className.toLowerCase();
 
     if (
-      src.includes('doubleclick') ||
-      src.includes('googlesyndication') ||
-      src.includes('/ads/') ||
-      src.includes('advertising') ||
-      id.includes('ad') ||
-      className.includes('ad')
+      AD_IFRAME_SRC_RE.test(src) ||
+      AD_IFRAME_ATTR_RE.test(id) ||
+      AD_IFRAME_ATTR_RE.test(className)
     ) {
-      (iframe as HTMLElement).style.display = 'none';
-      removedAdsCount++;
+      blockElement(iframe as HTMLElement);
     }
   });
 }
 
+// Collapse empty wrapper containers that only contained the blocked ad,
+// and shrink wrappers that still reserve space for the ad, so no blank
+// space is left in the layout
+function collapseEmptyContainers(element: HTMLElement, blockedHeight: number) {
+  const MAX_LEVELS = 8;
+  const CONTAINER_TAGS = new Set([
+    'DIV', 'SECTION', 'ASIDE', 'HEADER', 'FOOTER',
+    'ARTICLE', 'NAV', 'FORM', 'UL', 'OL', 'LI', 'MAIN', 'FIGURE', 'SPAN',
+  ]);
+
+  let current = element.parentElement;
+  let level = 0;
+
+  while (
+    current &&
+    current !== document.body &&
+    current !== document.documentElement &&
+    level < MAX_LEVELS
+  ) {
+    const tag = current.tagName;
+    if (!CONTAINER_TAGS.has(tag)) break;
+
+    let hasVisible = false;
+
+    for (const child of Array.from(current.children)) {
+      const h = child as HTMLElement;
+      if (isBlockedOrCollapsed(h)) continue;
+      if (isHidden(h)) continue;
+
+      // Hide small ad labels (e.g. "Advertisement", "Sponsored") that
+      // would otherwise keep the wrapper from collapsing
+      if (isAdLabel(h)) {
+        markBlocked(h);
+        continue;
+      }
+
+      hasVisible = true;
+    }
+
+    // Direct text content also counts as visible content
+    if (!hasVisible) {
+      for (const node of Array.from(current.childNodes)) {
+        if (node.nodeType === Node.TEXT_NODE && node.textContent && node.textContent.trim().length > 0) {
+          hasVisible = true;
+          break;
+        }
+      }
+    }
+
+    if (!hasVisible) {
+      // Wrapper only held the blocked ad -> remove it entirely
+      collapseElement(current);
+      current = current.parentElement;
+      level++;
+      continue;
+    }
+
+    // Wrapper has some content, but it may still reserve height for the ad
+    // (fixed height / min-height). If the ad made up most of its height,
+    // free that space so the wrapper hugs its real content.
+    const rect = current.getBoundingClientRect();
+    if (blockedHeight > 0 && rect.height >= 50 && blockedHeight / rect.height > 0.3) {
+      shrinkElement(current);
+      current = current.parentElement;
+      level++;
+      continue;
+    }
+
+    break;
+  }
+}
+
+function collapseElement(element: HTMLElement) {
+  element.style.display = 'none';
+  element.setAttribute('data-nis-collapsed', 'true');
+  removedAdsCount++;
+}
+
+function shrinkElement(element: HTMLElement) {
+  element.style.height = 'auto';
+  element.style.minHeight = '0';
+  element.style.maxHeight = 'none';
+  element.setAttribute('data-nis-shrunk', 'true');
+}
+
+function isBlockedOrCollapsed(element: HTMLElement): boolean {
+  return (
+    element.getAttribute('data-nis-blocked') === 'true' ||
+    element.getAttribute('data-nis-collapsed') === 'true'
+  );
+}
+
+function isHidden(element: HTMLElement): boolean {
+  if (element.style.display === 'none') return true;
+  const style = getComputedStyle(element);
+  return style.display === 'none' || style.visibility === 'hidden';
+}
+
+function isAdLabel(element: HTMLElement): boolean {
+  if (element.offsetHeight > 100) return false;
+  const text = element.textContent ? element.textContent.trim() : '';
+  if (!text || text.length > 40) return false;
+  return AD_LABEL_RE.test(text);
+}
+
 // Observe DOM changes and remove new ads
 function observeDOM() {
-  const observer = new MutationObserver((mutations) => {
-    if (!isEnabled) return;
+  if (observer) return;
+
+  observer = new MutationObserver((mutations) => {
+    if (!isEnabled || sitePaused) return;
 
     mutations.forEach((mutation) => {
       mutation.addedNodes.forEach((node) => {
-        if (node.nodeType === Node.ELEMENT_NODE) {
-          const element = node as HTMLElement;
+        if (node.nodeType !== Node.ELEMENT_NODE) return;
+        const element = node as HTMLElement;
 
-          // Check if the added element matches ad selectors
-          AD_SELECTORS.forEach((selector) => {
-            try {
-              if (element.matches && element.matches(selector)) {
-                element.style.display = 'none';
-                element.style.visibility = 'hidden';
-                element.setAttribute('data-nis-blocked', 'true');
-                removedAdsCount++;
-              }
-
-              // Also check children
-              const children = element.querySelectorAll(selector);
-              children.forEach((child) => {
-                (child as HTMLElement).style.display = 'none';
-                (child as HTMLElement).style.visibility = 'hidden';
-                (child as HTMLElement).setAttribute('data-nis-blocked', 'true');
-                removedAdsCount++;
-              });
-            } catch (error) {
-              // Ignore invalid selectors
+        activeSelectors.forEach((selector) => {
+          try {
+            if (element.matches && element.matches(selector)) {
+              blockElement(element);
             }
-          });
-        }
+
+            // Also check children
+            const children = element.querySelectorAll(selector);
+            children.forEach((child) => {
+              blockElement(child as HTMLElement);
+            });
+          } catch (error) {
+            // Ignore invalid selectors
+          }
+        });
       });
     });
   });
@@ -177,47 +349,101 @@ function observeDOM() {
   });
 }
 
-// Inject CSS to hide ad elements
+// Inject CSS to hide ad elements and collapse their space
 function injectStyles() {
+  if (styleEl) return;
+
   const style = document.createElement('style');
   style.id = 'nis-ad-blocker-styles';
   style.textContent = `
     /* NIS Ad Blocker - Hide common ad elements */
-    ${AD_SELECTORS.join(', ')} {
+    ${activeSelectors.join(', ')} {
       display: none !important;
       visibility: hidden !important;
       opacity: 0 !important;
-      position: absolute !important;
-      left: -9999px !important;
     }
 
-    /* Hide ad containers */
+    /* Hide ad containers (word-delimited so ids like "head-" are untouched) */
     div[id*="google_ads"],
     div[class*="google_ads"],
-    div[id*="ad-"],
+    div[id^="ad-"],
+    div[id*="-ad-"],
+    div[id$="-ad"],
+    div[id^="ads-"],
     div[class*="ad-wrapper"],
-    aside[class*="ad"] {
+    aside[class^="ad"],
+    aside[class*="-ad"] {
       display: none !important;
     }
 
-    /* Remove ad spacing */
-    [data-nis-blocked="true"] {
+    /* Collapse blocked ads and emptied wrappers completely so no
+       blank space is left behind */
+    [data-nis-blocked="true"],
+    [data-nis-collapsed="true"] {
+      display: none !important;
+      visibility: hidden !important;
+      opacity: 0 !important;
+      height: 0 !important;
+      max-height: 0 !important;
+      min-height: 0 !important;
+      width: auto !important;
       margin: 0 !important;
       padding: 0 !important;
-      height: 0 !important;
+      border: none !important;
+      overflow: hidden !important;
+      position: static !important;
+    }
+
+    /* Wrappers that reserved height for an ad shrink to their real content */
+    [data-nis-shrunk="true"] {
+      height: auto !important;
+      max-height: none !important;
       min-height: 0 !important;
     }
   `;
 
-  // Wait for head to be available
-  if (document.head) {
-    document.head.appendChild(style);
-  } else {
-    document.addEventListener('DOMContentLoaded', () => {
-      document.head.appendChild(style);
-    });
-  }
+  (document.head || document.documentElement).appendChild(style);
+  styleEl = style;
 }
+
+// Un-hide everything and remove injected styles
+function restoreElements() {
+  document.querySelectorAll('[data-nis-blocked="true"]').forEach((el) => {
+    const h = el as HTMLElement;
+    h.style.display = '';
+    h.style.visibility = '';
+    h.removeAttribute('data-nis-blocked');
+  });
+
+  document.querySelectorAll('[data-nis-collapsed="true"]').forEach((el) => {
+    const h = el as HTMLElement;
+    h.style.display = '';
+    h.removeAttribute('data-nis-collapsed');
+  });
+
+  document.querySelectorAll('[data-nis-shrunk="true"]').forEach((el) => {
+    const h = el as HTMLElement;
+    h.style.height = '';
+    h.style.minHeight = '';
+    h.style.maxHeight = '';
+    h.removeAttribute('data-nis-shrunk');
+  });
+
+  if (styleEl) {
+    styleEl.remove();
+    styleEl = null;
+  }
+
+  removedAdsCount = 0;
+}
+
+// Final cleanup once everything has loaded (catches lazy-loaded ads)
+window.addEventListener('load', () => {
+  if (isEnabled && !sitePaused) {
+    removeAds();
+    console.log(`NIS: Final cleanup - ${removedAdsCount} ad elements removed`);
+  }
+});
 
 // Listen for messages from popup
 chrome.runtime.onMessage.addListener((request, _sender, sendResponse) => {

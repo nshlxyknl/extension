@@ -218,5 +218,60 @@
       "urlFilter": "*://*.adsrvr.org/*",
       "resourceTypes": ["script", "image", "xmlhttprequest", "sub_frame"]
     }
+  },
+  {
+    "id": 21,
+    "priority": 1,
+    "action": {
+      "type": "block"
+    },
+    "condition": {
+      "urlFilter": "*://spclient.wg.spotify.com/ad-slot*",
+      "resourceTypes": ["xmlhttprequest", "script"]
+    }
+  },
+  {
+    "id": 22,
+    "priority": 1,
+    "action": {
+      "type": "block"
+    },
+    "condition": {
+      "urlFilter": "*://spclient.wg.spotify.com/ads*",
+      "resourceTypes": ["xmlhttprequest", "script"]
+    }
+  },
+  {
+    "id": 23,
+    "priority": 1,
+    "action": {
+      "type": "block"
+    },
+    "condition": {
+      "urlFilter": "*://*.ads.spotify.com/*",
+      "resourceTypes": ["xmlhttprequest", "script", "image", "sub_frame"]
+    }
+  },
+  {
+    "id": 24,
+    "priority": 1,
+    "action": {
+      "type": "block"
+    },
+    "condition": {
+      "urlFilter": "*://ads-fa.spotify.com/*",
+      "resourceTypes": ["xmlhttprequest", "script", "image"]
+    }
+  },
+  {
+    "id": 25,
+    "priority": 1,
+    "action": {
+      "type": "block"
+    },
+    "condition": {
+      "urlFilter": "*://*.google.com/pagead/*",
+      "resourceTypes": ["script", "image", "xmlhttprequest", "sub_frame"]
+    }
   }
 ]
