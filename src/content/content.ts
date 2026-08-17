@@ -229,6 +229,14 @@ function collapseEmptyContainers(element: HTMLElement, blockedHeight: number) {
     const tag = current.tagName;
     if (!CONTAINER_TAGS.has(tag)) break;
 
+    // Never collapse YouTube header / navigation containers
+    if (
+      current.id === 'masthead' ||
+      current.id === 'masthead-container' ||
+      current.tagName === 'YTD-MASTHEAD' ||
+      current.closest?.('#masthead, #masthead-container, ytd-masthead')
+    ) break;
+
     let hasVisible = false;
 
     for (const child of Array.from(current.children)) {
@@ -399,6 +407,19 @@ function injectStyles() {
       height: auto !important;
       max-height: none !important;
       min-height: 0 !important;
+    }
+
+    /* Never hide YouTube header / search / notification bar */
+    ytd-masthead, #masthead, #masthead-container,
+    #search-form, ytd-searchbox,
+    #buttons, #notification-button,
+    ytd-notification-topbar-button-renderer {
+      display: revert !important;
+      visibility: visible !important;
+      opacity: 1 !important;
+      height: auto !important;
+      max-height: none !important;
+      min-height: auto !important;
     }
   `;
 
