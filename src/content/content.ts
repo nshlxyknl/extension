@@ -136,11 +136,19 @@ function applySitePolicy() {
   }
 }
 
+// Sites where only site-specific selectors should be used (generic selectors
+// are too aggressive and break site UI, e.g. YouTube's search dropdown)
+const STRICT_SITE_RULES = new Set(['youtube.com']);
+
 function initAdBlocker() {
   if (!isEnabled || sitePaused) return;
 
   const siteKey = getSiteKey(location.hostname);
-  activeSelectors = [...AD_SELECTORS, ...(SITE_RULES[siteKey] || [])];
+  const siteSpecific = SITE_RULES[siteKey] || [];
+  // On sites like YouTube, skip generic selectors entirely to avoid breaking UI
+  activeSelectors = STRICT_SITE_RULES.has(siteKey)
+    ? siteSpecific
+    : [...AD_SELECTORS, ...siteSpecific];
 
   injectStyles();
   removeAds();
@@ -211,7 +219,8 @@ function removeAdIframes() {
 // and shrink wrappers that still reserve space for the ad, so no blank
 // space is left in the layout
 function collapseEmptyContainers(element: HTMLElement, blockedHeight: number) {
-  const MAX_LEVELS = 8;
+  const siteKey = getSiteKey(location.hostname);
+  const maxLevels = STRICT_SITE_RULES.has(siteKey) ? 3 : 8;
   const CONTAINER_TAGS = new Set([
     'DIV', 'SECTION', 'ASIDE', 'HEADER', 'FOOTER',
     'ARTICLE', 'NAV', 'FORM', 'UL', 'OL', 'LI', 'MAIN', 'FIGURE', 'SPAN',
@@ -224,18 +233,10 @@ function collapseEmptyContainers(element: HTMLElement, blockedHeight: number) {
     current &&
     current !== document.body &&
     current !== document.documentElement &&
-    level < MAX_LEVELS
+    level < maxLevels
   ) {
     const tag = current.tagName;
     if (!CONTAINER_TAGS.has(tag)) break;
-
-    // Never collapse YouTube header / navigation containers
-    if (
-      current.id === 'masthead' ||
-      current.id === 'masthead-container' ||
-      current.tagName === 'YTD-MASTHEAD' ||
-      current.closest?.('#masthead, #masthead-container, ytd-masthead')
-    ) break;
 
     let hasVisible = false;
 
@@ -407,19 +408,6 @@ function injectStyles() {
       height: auto !important;
       max-height: none !important;
       min-height: 0 !important;
-    }
-
-    /* Never hide YouTube header / search / notification bar */
-    ytd-masthead, #masthead, #masthead-container,
-    #search-form, ytd-searchbox,
-    #buttons, #notification-button,
-    ytd-notification-topbar-button-renderer {
-      display: revert !important;
-      visibility: visible !important;
-      opacity: 1 !important;
-      height: auto !important;
-      max-height: none !important;
-      min-height: auto !important;
     }
   `;
 
