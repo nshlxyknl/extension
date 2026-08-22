@@ -107,10 +107,28 @@ let siteAllowlist: string[] = DEFAULT_ALLOWLISTED_SITES;
 let styleEl: HTMLStyleElement | null = null;
 let observer: MutationObserver | null = null;
 let activeSelectors: string[] = AD_SELECTORS;
+// All active selectors joined into one query (single DOM call per scan)
+let combinedSelector: string | null = null;
 // Generic id/class-pattern CSS is unsafe on strict sites (can match legit UI)
 let useGenericContainerCss = true;
 // Iframe scanning is skipped on strict sites; network rules cover ads there
 let skipAdIframes = false;
+
+// Join selectors into one selector list so a scan costs a single
+// querySelectorAll/matches call instead of one call per selector.
+// Invalid selectors are dropped (a document fragment avoids touching the DOM).
+function buildCombinedSelector(selectors: string[]): string | null {
+  const valid = selectors.filter((selector) => {
+    try {
+      document.createDocumentFragment().querySelector(selector);
+      return true;
+    } catch {
+      console.warn('NIS: Invalid selector', selector);
+      return false;
+    }
+  });
+  return valid.length ? valid.join(', ') : null;
+}
 
 function isSiteAllowlisted(hostname: string, list: string[]): boolean {
   const h = hostname.toLowerCase();
@@ -220,6 +238,7 @@ function initAdBlocker() {
   const siteSpecific = findSiteRules(location.hostname);
   // On sites like YouTube, skip generic selectors entirely to avoid breaking UI
   activeSelectors = strictSite ? siteSpecific : [...AD_SELECTORS, ...siteSpecific];
+  combinedSelector = buildCombinedSelector(activeSelectors);
   useGenericContainerCss = !strictSite;
   skipAdIframes = !!strictSite;
 
@@ -230,23 +249,19 @@ function initAdBlocker() {
   console.log(`NIS: Removed ${removedAdsCount} ad elements`);
 }
 
-// Remove ad elements from the page
+// Remove ad elements from the page (single combined query)
 function removeAds() {
   if (!isEnabled || sitePaused) return;
 
-  activeSelectors.forEach((selector) => {
+  if (combinedSelector) {
     try {
-      const elements = document.querySelectorAll(selector);
-      elements.forEach((element) => {
-        if (element && element.parentNode) {
-          blockElement(element as HTMLElement);
-        }
+      document.querySelectorAll(combinedSelector).forEach((element) => {
+        blockElement(element as HTMLElement);
       });
-    } catch (error) {
+    } catch {
       // Selector might be invalid for some pages
-      console.warn('NIS: Invalid selector', selector);
     }
-  });
+  }
 
   // Also remove iframes that are likely ads (skipped on strict sites)
   if (!skipAdIframes) {
@@ -401,35 +416,74 @@ function isAdLabel(element: HTMLElement): boolean {
   return AD_LABEL_RE.test(text);
 }
 
-// Observe DOM changes and remove new ads
+// Observe DOM changes and remove new ads.
+// Mutations are batched and processed during idle time: React-style apps
+// (e.g. fpl.team) mutate the DOM constantly, so scanning synchronously on
+// every mutation causes visible input lag. Matching elements are already
+// hidden instantly by the injected stylesheet - this pass only marks,
+// collapses, and counts them, so a short delay is invisible to the user.
 function observeDOM() {
   if (observer) return;
+
+  let scheduled = false;
+  const pendingRoots = new Set<Element>();
+  // Above this many queued nodes, one full-document scan beats deduplicating
+  const MAX_ROOTS = 200;
+
+  const flush = () => {
+    scheduled = false;
+    if (!isEnabled || sitePaused || !combinedSelector) return;
+
+    let roots: Element[];
+    if (pendingRoots.size >= MAX_ROOTS) {
+      roots = [document.body];
+    } else {
+      // Skip roots nested inside another root (avoids rescanning subtrees)
+      roots = [...pendingRoots].filter(
+        (node) => ![...pendingRoots].some((other) => other !== node && other.contains(node)),
+      );
+    }
+    pendingRoots.clear();
+    if (!roots.length) return;
+
+    try {
+      for (const root of roots) {
+        if (root.matches(combinedSelector)) {
+          blockElement(root as HTMLElement);
+        }
+        root.querySelectorAll(combinedSelector).forEach((el) => {
+          blockElement(el as HTMLElement);
+        });
+      }
+    } catch {
+      // Ignore invalid selector edge cases
+    }
+
+    if (!skipAdIframes) {
+      removeAdIframes();
+    }
+  };
+
+  const schedule = () => {
+    if (scheduled) return;
+    scheduled = true;
+    if (typeof window.requestIdleCallback === 'function') {
+      window.requestIdleCallback(flush, { timeout: 300 });
+    } else {
+      setTimeout(flush, 150);
+    }
+  };
 
   observer = new MutationObserver((mutations) => {
     if (!isEnabled || sitePaused) return;
 
-    mutations.forEach((mutation) => {
-      mutation.addedNodes.forEach((node) => {
-        if (node.nodeType !== Node.ELEMENT_NODE) return;
-        const element = node as HTMLElement;
-
-        activeSelectors.forEach((selector) => {
-          try {
-            if (element.matches && element.matches(selector)) {
-              blockElement(element);
-            }
-
-            // Also check children
-            const children = element.querySelectorAll(selector);
-            children.forEach((child) => {
-              blockElement(child as HTMLElement);
-            });
-          } catch (error) {
-            // Ignore invalid selectors
-          }
-        });
-      });
-    });
+    for (const mutation of mutations) {
+      for (const node of mutation.addedNodes) {
+        if (node.nodeType !== Node.ELEMENT_NODE) continue;
+        pendingRoots.add(node as Element);
+      }
+    }
+    if (pendingRoots.size) schedule();
   });
 
   observer.observe(document.body, {
