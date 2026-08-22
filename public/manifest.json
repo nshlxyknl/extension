@@ -1,8 +1,17 @@
 {
   "manifest_version": 3,
   "name": "nisch",
-  "version": "1.0.0",
+  "version": "1.0.1",
   "description": "Powerful ad blocker that removes ads, trackers, and improves browsing speed",
+  "browser_specific_settings": {
+    "gecko": {
+      "id": "nis-ad-blocker@nisch",
+      "strict_min_version": "121.0"
+    },
+    "gecko_android": {
+      "strict_min_version": "121.0"
+    }
+  },
   "permissions": [
     "storage",
     "activeTab",
@@ -25,7 +34,10 @@
     }
   },
   "background": {
-    "service_worker": "background.js"
+    "service_worker": "background.js",
+    "scripts": [
+      "background.js"
+    ]
   },
   "content_scripts": [
     {

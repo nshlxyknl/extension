@@ -50,8 +50,35 @@ const SITE_RULES: Record<string, string[]> = {
   'reddit.com': ['[data-testid="search-ad"]', 'shreddit-ad'],
   'spotify.com': ['[data-testid="advertisement"]'],
   'open.spotify.com': ['[data-testid="advertisement"]'],
-  'youtube.com': ['ytd-ad-slot-renderer', 'ytd-display-ad-renderer', 'ytd-in-feed-ad-layout-renderer', 'ytd-banner-promo-renderer', '.ytp-ad-module', 'ytd-ad-slot-renderer', 'ytd-player-legacy-desktop-watch-ads-renderer', 'ytd-statement-banner-renderer[ad]', '.ad-container'],
+  'youtube.com': [
+    'ytd-ad-slot-renderer',
+    'ytd-display-ad-renderer',
+    'ytd-in-feed-ad-layout-renderer',
+    'ytd-banner-promo-renderer',
+    '.ytp-ad-module',
+    'ytd-player-legacy-desktop-watch-ads-renderer',
+    'ytd-statement-banner-renderer[ad]',
+    'ytd-promoted-sparkles-web-renderer',
+    'ytd-companion-slot-renderer',
+  ],
+  'm.youtube.com': [
+    'ytm-promoted-video-renderer',
+    'ytm-companion-ad-renderer',
+    '.companion-ad-container',
+  ],
 };
+
+// Look up site rules by hostname, walking up subdomains so e.g.
+// music.youtube.com resolves to the youtube.com rules
+function findSiteRules(hostname: string): string[] {
+  const h = hostname.toLowerCase().replace(/\.$/, '');
+  const parts = h.split('.');
+  for (let i = 0; i < parts.length - 1; i++) {
+    const key = parts.slice(i).join('.');
+    if (SITE_RULES[key]) return SITE_RULES[key];
+  }
+  return [];
+}
 
 // Sites where blocking is paused entirely (AI chat/search apps are prone
 // to false positives)
@@ -80,11 +107,10 @@ let siteAllowlist: string[] = DEFAULT_ALLOWLISTED_SITES;
 let styleEl: HTMLStyleElement | null = null;
 let observer: MutationObserver | null = null;
 let activeSelectors: string[] = AD_SELECTORS;
-
-function getSiteKey(hostname: string): string {
-  const parts = hostname.toLowerCase().replace(/\.$/, '').split('.');
-  return parts.length > 2 && parts[0] === 'www' ? parts.slice(1).join('.') : parts.join('.');
-}
+// Generic id/class-pattern CSS is unsafe on strict sites (can match legit UI)
+let useGenericContainerCss = true;
+// Iframe scanning is skipped on strict sites; network rules cover ads there
+let skipAdIframes = false;
 
 function isSiteAllowlisted(hostname: string, list: string[]): boolean {
   const h = hostname.toLowerCase();
@@ -138,17 +164,64 @@ function applySitePolicy() {
 
 // Sites where only site-specific selectors should be used (generic selectors
 // are too aggressive and break site UI, e.g. YouTube's search dropdown)
-const STRICT_SITE_RULES = new Set(['youtube.com']);
+const STRICT_SITE_RULES = ['youtube.com'];
+
+function matchesSite(hostname: string, site: string): boolean {
+  const h = hostname.toLowerCase().replace(/\.$/, '');
+  return h === site || h.endsWith('.' + site);
+}
+
+// Returns the strict-site key matching this hostname (subdomains included,
+// so m.youtube.com / music.youtube.com are treated like youtube.com)
+function getStrictSite(hostname: string): string | null {
+  for (const site of STRICT_SITE_RULES) {
+    if (matchesSite(hostname, site)) return site;
+  }
+  return null;
+}
+
+// Critical page chrome that must NEVER be hidden, collapsed, or shrunk by
+// this extension. Blocking an ad *inside* these containers is still allowed.
+const PROTECTED_UI_SELECTORS = [
+  // YouTube header: search bar + notification bell live here
+  'ytd-masthead',
+  '#masthead-container',
+  'yt-searchbox',
+  'ytd-searchbox',
+  '#masthead-search',
+  'ytd-notification-topbar-button-renderer',
+  'ytd-topbar-menu-button-renderer',
+  // YouTube popups: search suggestions, notification panel, menus
+  'ytd-popup-container',
+  'tp-yt-iron-overlay-backdrop',
+  'tp-yt-paper-dialog',
+  // YouTube navigation sidebar + main layout shells
+  'ytd-guide-renderer',
+  'tp-yt-app-drawer',
+  'ytd-mini-guide-renderer',
+  // Video player shell (ads inside it are hidden individually)
+  '#movie_player',
+  '#full-bleed-container',
+  '#player',
+].join(', ');
+
+function isProtectedUi(element: Element): boolean {
+  try {
+    return element.matches(PROTECTED_UI_SELECTORS);
+  } catch {
+    return false;
+  }
+}
 
 function initAdBlocker() {
   if (!isEnabled || sitePaused) return;
 
-  const siteKey = getSiteKey(location.hostname);
-  const siteSpecific = SITE_RULES[siteKey] || [];
+  const strictSite = getStrictSite(location.hostname);
+  const siteSpecific = findSiteRules(location.hostname);
   // On sites like YouTube, skip generic selectors entirely to avoid breaking UI
-  activeSelectors = STRICT_SITE_RULES.has(siteKey)
-    ? siteSpecific
-    : [...AD_SELECTORS, ...siteSpecific];
+  activeSelectors = strictSite ? siteSpecific : [...AD_SELECTORS, ...siteSpecific];
+  useGenericContainerCss = !strictSite;
+  skipAdIframes = !!strictSite;
 
   injectStyles();
   removeAds();
@@ -175,13 +248,17 @@ function removeAds() {
     }
   });
 
-  // Also remove iframes that are likely ads
-  removeAdIframes();
+  // Also remove iframes that are likely ads (skipped on strict sites)
+  if (!skipAdIframes) {
+    removeAdIframes();
+  }
 }
 
 // Mark an element as blocked and collapse the space it took
 function blockElement(element: HTMLElement) {
   if (element.getAttribute('data-nis-blocked') === 'true') return;
+  // Never touch critical page chrome (search bar, notification bell, player...)
+  if (isProtectedUi(element)) return;
   // Capture height before hiding so we know how much space the ad occupied
   const blockedHeight = element.getBoundingClientRect().height;
   markBlocked(element);
@@ -219,8 +296,7 @@ function removeAdIframes() {
 // and shrink wrappers that still reserve space for the ad, so no blank
 // space is left in the layout
 function collapseEmptyContainers(element: HTMLElement, blockedHeight: number) {
-  const siteKey = getSiteKey(location.hostname);
-  const maxLevels = STRICT_SITE_RULES.has(siteKey) ? 3 : 8;
+  const maxLevels = getStrictSite(location.hostname) ? 3 : 8;
   const CONTAINER_TAGS = new Set([
     'DIV', 'SECTION', 'ASIDE', 'HEADER', 'FOOTER',
     'ARTICLE', 'NAV', 'FORM', 'UL', 'OL', 'LI', 'MAIN', 'FIGURE', 'SPAN',
@@ -235,6 +311,10 @@ function collapseEmptyContainers(element: HTMLElement, blockedHeight: number) {
     current !== document.documentElement &&
     level < maxLevels
   ) {
+    // Never collapse or shrink critical page chrome (header, search bar,
+    // notification panel, player shell...)
+    if (isProtectedUi(current)) break;
+
     const tag = current.tagName;
     if (!CONTAINER_TAGS.has(tag)) break;
 
@@ -362,16 +442,10 @@ function observeDOM() {
 function injectStyles() {
   if (styleEl) return;
 
-  const style = document.createElement('style');
-  style.id = 'nis-ad-blocker-styles';
-  style.textContent = `
-    /* NIS Ad Blocker - Hide common ad elements */
-    ${activeSelectors.join(', ')} {
-      display: none !important;
-      visibility: hidden !important;
-      opacity: 0 !important;
-    }
-
+  // Generic id/class-pattern rules are only safe on non-strict sites; on
+  // sites like YouTube they can match legit UI (search bar, notifications)
+  const genericContainerCss = useGenericContainerCss
+    ? `
     /* Hide ad containers (word-delimited so ids like "head-" are untouched) */
     div[id*="google_ads"],
     div[class*="google_ads"],
@@ -384,7 +458,19 @@ function injectStyles() {
     aside[class*="-ad"] {
       display: none !important;
     }
+  `
+    : '';
 
+  const style = document.createElement('style');
+  style.id = 'nis-ad-blocker-styles';
+  style.textContent = `
+    /* NIS Ad Blocker - Hide common ad elements */
+    ${activeSelectors.join(', ')} {
+      display: none !important;
+      visibility: hidden !important;
+      opacity: 0 !important;
+    }
+${genericContainerCss}
     /* Collapse blocked ads and emptied wrappers completely so no
        blank space is left behind */
     [data-nis-blocked="true"],
